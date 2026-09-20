@@ -1,0 +1,54 @@
+# Build and test output
+**/[Bb]in/
+**/[Oo]bj/
+artifacts/
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+*.trx
+*.log
+
+# IDE state
+.vs/
+.idea/
+*.user
+*.suo
+*.rsuser
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# Local configuration and credentials
+.local/
+.secrets/
+.env
+.env.*
+!.env.example
+!.env.*.example
+appsettings.[Ll]ocal.json
+appsettings.*.[Ll]ocal.json
+secrets.json
+*.dpapi
+*.clixml
+*.pfx
+*.p12
+*.pem
+*.key
+*.publishsettings
+*.pubxml
+
+# Local data, database backups, and model files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+*.onnx
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

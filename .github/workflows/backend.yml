@@ -1,0 +1,29 @@
+name: Backend
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: ta_backend_test
+          POSTGRES_USER: ta_backend_test
+          # Disposable isolated CI service only; never a development/deployment credential.
+          POSTGRES_PASSWORD: ci-ephemeral-test-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ta_backend_test -d ta_backend_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      Tests__Postgres: Host=localhost;Port=5432;Database=ta_backend_test;Username=ta_backend_test;Password=ci-ephemeral-test-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet restore --locked-mode
+      - run: dotnet build --no-restore --configuration Release
+      - run: dotnet test --no-build --configuration Release --logger trx
