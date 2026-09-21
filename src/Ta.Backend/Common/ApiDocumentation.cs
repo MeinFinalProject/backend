@@ -50,6 +50,32 @@ public static class ApiDocumentation
                     operation.Responses.TryAdd("429", new OpenApiResponse { Description = "Request limit reached. Retry after the Retry-After interval." });
                     operation.Responses.TryAdd("503", new OpenApiResponse { Description = "Database or gallery unavailable. Retry after the Retry-After interval." });
                 }
+                if (operation.OperationId == "UploadEnrollmentPhoto")
+                {
+                    // Flatten the inferred allOf so Swagger renders one pose selector and file picker.
+                    operation.RequestBody = new OpenApiRequestBody
+                    {
+                        Required = true,
+                        Content = new Dictionary<string, OpenApiMediaType>
+                        {
+                            ["multipart/form-data"] = new()
+                            {
+                                Schema = new OpenApiSchema
+                                {
+                                    Type = JsonSchemaType.Object,
+                                    Required = new HashSet<string> { "pose", "image" },
+                                    Properties = new Dictionary<string, IOpenApiSchema>
+                                    {
+                                        ["pose"] = new OpenApiSchema { Type = JsonSchemaType.String, Default = JsonValue.Create("frontal"),
+                                            Enum = new List<System.Text.Json.Nodes.JsonNode> { JsonValue.Create("frontal")!, JsonValue.Create("left")!, JsonValue.Create("right")!, JsonValue.Create("up")!, JsonValue.Create("down")! } },
+                                        ["image"] = new OpenApiSchema { Type = JsonSchemaType.String, Format = "binary",
+                                            Description = "One upright JPEG or PNG, 112-2048 pixels per side, at most 5 MiB." }
+                                    }
+                                }
+                            }
+                        }
+                    };
+                }
                 if (operation.OperationId == "GetGallery")
                 {
                     operation.Parameters ??= [];

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Ta.Backend.Common;
 using Ta.Backend.Features.AcademicManagement;
@@ -10,6 +11,7 @@ namespace Ta.Backend.Features.Biometrics;
 
 public static class EnrollmentEndpoints
 {
+    private const int MaxImageBytes = 5 * 1024 * 1024;
     private static readonly string[] Poses = ["frontal", "left", "right", "up", "down"];
     public static void MapEnrollmentEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -105,17 +107,53 @@ public static class EnrollmentEndpoints
         // Inference runs BEFORE acquiring the academic mutation lock, keeping Edge ingestion responsive.
         endpoints.MapPost("/biometric-enrollments/{id:guid}/samples", UploadSample).RequireAuthorization(Roles.StudentPolicy)
             .WithTags("Biometric enrollment").WithSummary("Extract a sample from a JPEG or PNG (base64, at most 5 MiB)");
+        endpoints.MapPost("/biometric-enrollments/{id:guid}/samples/upload", UploadFile).RequireAuthorization(Roles.StudentPolicy)
+            // Authentication uses an explicit bearer header, never ambient cookies.
+            .DisableAntiforgery()
+            // Keep photo buffers in memory, including rejected oversized parts.
+            .WithFormOptions(memoryBufferThreshold: MaxImageBytes + 1, multipartBodyLengthLimit: MaxImageBytes,
+                valueCountLimit: 2, keyLengthLimit: 64, valueLengthLimit: 64)
+            .WithName("UploadEnrollmentPhoto").WithTags("Biometric enrollment")
+            .WithSummary("Upload one enrollment photo (JPEG or PNG, at most 5 MiB)")
+            .WithDescription("Sign in as the student and authorize Human. Choose a photo and its pose: frontal, left, right, up, or down. Upload 12 distinct photos, with at least two per pose; then submit the enrollment for administrator review. The backend extracts the embedding; the photo and filename are not retained.")
+            .Produces<EnrollmentSampleResult>().Produces<ApiError>(400).Produces<ApiError>(409).Produces<ApiError>(413);
+    }
+
+    private static async Task<IResult> UploadFile(Guid id, [FromForm] string pose, IFormFile image, HttpRequest request,
+        AcademicAccess access, BackendDbContext db, IEmbeddingExtractor extractor, IConfiguration config, CancellationToken ct)
+    {
+        DomainException.Require(request.Form.Files.Count == 1, "one_image_per_request");
+        DomainException.Require(image.Length is > 0 and <= MaxImageBytes, "image_too_large");
+        DomainException.Require(image.ContentType is "image/jpeg" or "image/png", "jpeg_or_png_required");
+        var enrollment = await DraftEnrollment(id, pose, access, db, ct);
+        using var stream = new MemoryStream((int)image.Length);
+        await image.CopyToAsync(stream, ct);
+        return await SaveSample(enrollment, pose, stream.ToArray(), access, db, extractor, config, ct);
     }
 
     private static async Task<IResult> UploadSample(Guid id, EnrollmentSample request, AcademicAccess access, BackendDbContext db,
         IEmbeddingExtractor extractor, IConfiguration config, CancellationToken ct)
     {
-        var enrollment = await OwnEnrollment(id, access, db, ct);
-        DomainException.Require(enrollment.BiometricEnrollmentStatus == "draft", "enrollment_not_draft", 409);
-        DomainException.Require(Poses.Contains(request.Pose) && request.ImageBase64 is { Length: > 0 and <= 6990508 }, "invalid_sample");
+        var enrollment = await DraftEnrollment(id, request.Pose, access, db, ct);
+        DomainException.Require(request.ImageBase64 is { Length: > 0 and <= 6990508 }, "invalid_sample");
         byte[] bytes;
         try { bytes = Convert.FromBase64String(request.ImageBase64); } catch (FormatException) { throw new DomainException("invalid_image_encoding"); }
-        DomainException.Require(bytes.Length is > 0 and <= 5242880, "image_too_large");
+        DomainException.Require(bytes.Length is > 0 and <= MaxImageBytes, "image_too_large");
+        return await SaveSample(enrollment, request.Pose, bytes, access, db, extractor, config, ct);
+    }
+
+    private static async Task<BiometricEnrollment> DraftEnrollment(Guid id, string pose, AcademicAccess access, BackendDbContext db, CancellationToken ct)
+    {
+        var enrollment = await OwnEnrollment(id, access, db, ct);
+        DomainException.Require(enrollment.BiometricEnrollmentStatus == "draft", "enrollment_not_draft", 409);
+        DomainException.Require(Poses.Contains(pose), "invalid_sample");
+        return enrollment;
+    }
+
+    private static async Task<IResult> SaveSample(BiometricEnrollment enrollment, string pose, byte[] bytes, AcademicAccess access,
+        BackendDbContext db, IEmbeddingExtractor extractor, IConfiguration config, CancellationToken ct)
+    {
+        var id = enrollment.BiometricEnrollmentId;
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var face = await extractor.Extract(bytes, ct);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
@@ -126,14 +164,15 @@ public static class EnrollmentEndpoints
         DomainException.Require(await db.Set<Account>().AnyAsync(a => a.AccountId == student.AccountId && a.AccountStatus == "approved", ct), "account_not_approved", 403);
         DomainException.Require(await db.Set<BiometricTemplate>().CountAsync(t => t.BiometricEnrollmentId == id, ct) < 12, "sample_limit_reached", 409);
         DomainException.Require(!await db.Set<BiometricTemplate>().AnyAsync(t => t.BiometricEnrollmentId == id && t.BiometricTemplateImageSha256 == hash, ct), "duplicate_sample", 409);
-        var sample = new BiometricTemplate { BiometricEnrollmentId = id, BiometricTemplatePose = request.Pose,
+        var sample = new BiometricTemplate { BiometricEnrollmentId = id, BiometricTemplatePose = pose,
             BiometricTemplateModelSha256 = config["Biometrics:ModelSha256"]!, BiometricTemplateImageSha256 = hash,
             BiometricTemplateEmbedding = face.Embedding, BiometricTemplateDetectionScore = face.DetectionScore, BiometricTemplateAlignmentError = face.AlignmentError };
         db.Add(sample);
-        AuditLog.Add(db, access.User, "biometrics.add_sample", sample.BiometricTemplateId.ToString(), new { enrollment_id = id, request.Pose });
+        AuditLog.Add(db, access.User, "biometrics.add_sample", sample.BiometricTemplateId.ToString(), new { enrollment_id = id, pose });
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return Results.Ok(new { sample.BiometricTemplateId, sample.BiometricTemplatePose, sample.BiometricTemplateDetectionScore, sample.BiometricTemplateAlignmentError });
+        return Results.Ok(new EnrollmentSampleResult(sample.BiometricTemplateId, sample.BiometricTemplatePose,
+            sample.BiometricTemplateDetectionScore, sample.BiometricTemplateAlignmentError));
     }
     private static async Task<BiometricEnrollment> OwnEnrollment(Guid id, AcademicAccess access, BackendDbContext db, CancellationToken ct)
     {
@@ -144,5 +183,6 @@ public static class EnrollmentEndpoints
 }
 public sealed record EnrollmentConsent(bool Accepted, string Version);
 public sealed record EnrollmentSample(string Pose, string ImageBase64);
+public sealed record EnrollmentSampleResult(Guid BiometricTemplateId, string BiometricTemplatePose, double BiometricTemplateDetectionScore, double BiometricTemplateAlignmentError);
 public sealed record EnrollmentReview(string Decision, string Note, bool IdentityVerified);
 public sealed record EnrollmentReason(string Reason);

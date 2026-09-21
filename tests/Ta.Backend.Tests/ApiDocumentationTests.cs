@@ -38,6 +38,12 @@ public sealed class ApiDocumentationTests(BackendFixture fixture) : IClassFixtur
         var studentSecurity = enrollment.GetProperty("security");
         Assert.Equal(1, studentSecurity.GetArrayLength());
         Assert.True(studentSecurity[0].TryGetProperty("Human", out _));
+        var upload = paths.GetProperty("/api/v1/biometric-enrollments/{id}/samples/upload").GetProperty("post");
+        Assert.Equal("UploadEnrollmentPhoto", upload.GetProperty("operationId").GetString());
+        Assert.True(upload.GetProperty("security")[0].TryGetProperty("Human", out _));
+        var photoForm = Resolve(root, upload.GetProperty("requestBody").GetProperty("content").GetProperty("multipart/form-data").GetProperty("schema"));
+        Assert.Equal(5, photoForm.GetProperty("properties").GetProperty("pose").GetProperty("enum").GetArrayLength());
+        Assert.Equal("binary", photoForm.GetProperty("properties").GetProperty("image").GetProperty("format").GetString());
         var reviewSecurity = paths.GetProperty("/api/v1/biometric-enrollments/{id}/review").GetProperty("post").GetProperty("security");
         Assert.Contains(reviewSecurity.EnumerateArray(), r => r.TryGetProperty("Administrator", out _));
         Assert.Contains(reviewSecurity.EnumerateArray(), r => r.TryGetProperty("Human", out _));

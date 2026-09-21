@@ -364,7 +364,11 @@ public sealed class AcademicWorkflowTests(BackendFixture fixture) : IClassFixtur
         Assert.Equal(HttpStatusCode.BadRequest, (await Post(student, $"/biometric-enrollments/{id}/submit", new { })).StatusCode);
         string[] poses = ["frontal", "left", "right", "up", "down", "frontal", "left", "right", "up", "down", "frontal", "frontal"];
         for (var i = 0; i < poses.Length; i++)
-            await Ok(await Post(student, $"/biometric-enrollments/{id}/samples", new EnrollmentSample(poses[i], Convert.ToBase64String([(byte)i]))));
+        {
+            // Both supported upload formats feed the same enrollment/gallery workflow.
+            if (i % 2 == 0) await Ok(await Upload(student, id, poses[i], [(byte)i]));
+            else await Ok(await Post(student, $"/biometric-enrollments/{id}/samples", new EnrollmentSample(poses[i], Convert.ToBase64String([(byte)i]))));
+        }
         Assert.Equal(HttpStatusCode.Conflict, (await Post(student, $"/biometric-enrollments/{id}/samples", new EnrollmentSample("frontal", "AA=="))).StatusCode);
         var details = await Ok(await student.GetAsync(V1 + $"/biometric-enrollments/{id}"));
         Assert.DoesNotContain("embedding", details.GetRawText());
@@ -383,6 +387,63 @@ public sealed class AcademicWorkflowTests(BackendFixture fixture) : IClassFixtur
         Assert.NotEqual(previousEtag, revoked.Headers.ETag!.ToString());
         var next = await revoked.Content.ReadFromJsonAsync<GalleryDocument>(WireJson.Options);
         Assert.DoesNotContain(next!.Templates, t => t.IdentityId == s.Student.StudentIdentityId);
+    }
+
+    [Fact]
+    public async Task Photo_upload_requires_own_student_and_rejects_invalid_or_duplicate_samples()
+    {
+        using var s = await Setup();
+        using var other = await Setup();
+        await using var app = application.WithWebHostBuilder(builder => builder.ConfigureServices(services => services.AddSingleton<IEmbeddingExtractor, TestExtractor>()));
+        using var student = app.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        student.DefaultRequestHeaders.Authorization = s.StudentClient.DefaultRequestHeaders.Authorization;
+        using var admin = Client(fixture.AdminToken);
+        using var anonymous = Client();
+        var created = await Ok(await Post(student, "/biometric-enrollments", new EnrollmentConsent(true, "research-v1")));
+        var id = created.GetProperty("biometric_enrollment_id").GetGuid();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Upload(anonymous, id, "frontal", [1])).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Upload(admin, id, "frontal", [1])).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Upload(s.LecturerClient, id, "frontal", [1])).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Upload(other.StudentClient, id, "frontal", [1])).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Upload(student, id, "invalid-pose", [1])).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Upload(student, id, "frontal", [1], "text/plain")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Upload(student, id, "frontal", [])).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Upload(student, id, "frontal", new byte[5 * 1024 * 1024 + 1])).StatusCode);
+        using (var missing = new MultipartFormDataContent())
+        {
+            missing.Add(new StringContent("frontal"), "pose");
+            Assert.Equal(HttpStatusCode.BadRequest, (await student.PostAsync(V1 + $"/biometric-enrollments/{id}/samples/upload", missing)).StatusCode);
+        }
+        using (var multiple = new MultipartFormDataContent())
+        {
+            multiple.Add(new StringContent("frontal"), "pose");
+            multiple.Add(new ByteArrayContent([1]), "image", "first.png");
+            multiple.Add(new ByteArrayContent([2]), "another", "second.png");
+            Assert.Equal(HttpStatusCode.BadRequest, (await student.PostAsync(V1 + $"/biometric-enrollments/{id}/samples/upload", multiple)).StatusCode);
+        }
+        // Above the framework's default 64 KiB disk-buffer threshold; still an in-memory upload.
+        var sample = new byte[100 * 1024];
+        sample[0] = 1;
+        var result = await Ok(await Upload(student, id, "frontal", sample));
+        Assert.Equal("frontal", result.GetProperty("biometric_template_pose").GetString());
+        Assert.DoesNotContain("embedding", result.GetRawText());
+        Assert.Equal(HttpStatusCode.Conflict, (await Upload(student, id, "left", sample)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Post(student, $"/biometric-enrollments/{id}/submit", new { })).StatusCode);
+        await using var db = fixture.OpenDatabase();
+        var stored = await db.Set<BiometricTemplate>().SingleAsync(t => t.BiometricEnrollmentId == id);
+        Assert.Equal(2048, stored.BiometricTemplateEmbedding.Length);
+        Assert.False(stored.BiometricTemplateActive);
+        Assert.Equal("frontal", stored.BiometricTemplatePose);
+    }
+
+    private static async Task<HttpResponseMessage> Upload(HttpClient client, Guid enrollmentId, string pose, byte[] bytes, string mediaType = "image/png")
+    {
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(pose), "pose");
+        var image = new ByteArrayContent(bytes);
+        image.Headers.ContentType = new(mediaType);
+        content.Add(image, "image", "sample.png");
+        return await client.PostAsync(V1 + $"/biometric-enrollments/{enrollmentId}/samples/upload", content);
     }
 
     // This double isolates enrollment transactions/publication; native inference is tested separately.
