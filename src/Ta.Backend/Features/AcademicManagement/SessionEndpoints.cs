@@ -32,8 +32,16 @@ public static class SessionEndpoints
                 }
             }
             if (classId is not null) query = query.Where(s => s.AcademicClassId == classId);
-            if (from is not null) query = query.Where(s => s.TeachingSessionStart >= from);
-            if (until is not null) query = query.Where(s => s.TeachingSessionStart < until);
+            if (from is not null)
+            {
+                var fromUtc = from.Value.ToUniversalTime();
+                query = query.Where(s => s.TeachingSessionStart >= fromUtc);
+            }
+            if (until is not null)
+            {
+                var untilUtc = until.Value.ToUniversalTime();
+                query = query.Where(s => s.TeachingSessionStart < untilUtc);
+            }
             return await query.OrderBy(s => s.TeachingSessionStart).Take(500).ToListAsync(ct);
         });
         group.MapPost("/classes/{classId:guid}/sessions", async (Guid classId, SessionRequest request, AcademicAccess access, SessionService service, BackendDbContext db, CancellationToken ct) =>

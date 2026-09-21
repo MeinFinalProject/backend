@@ -23,6 +23,9 @@ public sealed class SessionService(BackendDbContext db)
 
     public async Task Apply(TeachingSession session, SessionRequest request, CancellationToken ct)
     {
+        // Npgsql timestamp-with-time-zone parameters require UTC, including query bounds.
+        // Browser forms legitimately send the academic time zone offset (+07:00).
+        request = request with { Start = request.Start.ToUniversalTime(), End = request.End.ToUniversalTime() };
         DomainException.Require(session.TeachingSessionStatus == "scheduled" && !session.TeachingSessionRosterFrozen
             && (session.TeachingSessionStart == default || session.TeachingSessionStart.AddMinutes(-session.TeachingSessionEarlyMinutes) > DateTimeOffset.UtcNow),
             "session_window_already_started", 409);

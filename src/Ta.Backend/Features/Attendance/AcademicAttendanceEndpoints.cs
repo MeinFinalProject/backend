@@ -42,7 +42,7 @@ public static class AcademicAttendanceEndpoints
             else record.SessionAttendanceRevision++;
             record.SessionAttendanceStatus = request.Status;
             record.SessionAttendanceSource = "manual";
-            record.SessionAttendanceOccurredAt = request.Status is "present" or "late" ? request.OccurredAt : null;
+            record.SessionAttendanceOccurredAt = request.Status is "present" or "late" ? request.OccurredAt?.ToUniversalTime() : null;
             record.SessionAttendanceLateMinutes = record.SessionAttendanceOccurredAt is {} at ? Math.Max(0, (decimal)(at - session.TeachingSessionStart).TotalMinutes) : 0;
             record.SessionAttendanceUpdatedAt = DateTimeOffset.UtcNow;
             AuditLog.Add(db, access.User, "attendance.correct", record.SessionAttendanceId.ToString(), new { before, after = request });
@@ -52,7 +52,9 @@ public static class AcademicAttendanceEndpoints
         group.MapGet("/students/{studentId:guid}", async (Guid studentId, Guid? classId, AcademicAccess access, BackendDbContext db, CancellationToken ct) =>
         {
             if (access.User.IsInRole(Roles.Student)) DomainException.Require((await access.Student(ct)).StudentId == studentId, "own_attendance_only", 403);
-            var query = db.Set<TeachingSession>().Where(s => s.TeachingSessionStatus != "cancelled" && s.TeachingSessionEnd <= DateTimeOffset.UtcNow);
+            var now = DateTimeOffset.UtcNow;
+            var query = db.Set<TeachingSession>().Where(s => s.TeachingSessionStatus != "cancelled"
+                && s.TeachingSessionStart.AddMinutes(-s.TeachingSessionEarlyMinutes) <= now);
             if (classId.HasValue) query = query.Where(s => s.AcademicClassId == classId.Value);
             if (access.User.IsInRole(Roles.Lecturer))
             {
@@ -67,14 +69,17 @@ public static class AcademicAttendanceEndpoints
             var records = await db.Set<SessionAttendance>().Where(a => a.StudentId == studentId && ids.Contains(a.TeachingSessionId)).ToDictionaryAsync(a => a.TeachingSessionId, ct);
             var classes = await db.Set<AcademicClass>().Where(c => sessions.Select(s => s.AcademicClassId).Distinct().ToArray().Contains(c.AcademicClassId)).ToListAsync(ct);
             var terms = await db.Set<AcademicTerm>().ToDictionaryAsync(t => t.AcademicTermId, ct);
-            var summaries = sessions.GroupBy(s => s.AcademicClassId).Select(g =>
+            var summaries = sessions.Where(s => s.TeachingSessionEnd <= now).GroupBy(s => s.AcademicClassId).Select(g =>
             {
                 var statuses = g.Select(s => records.GetValueOrDefault(s.TeachingSessionId)?.SessionAttendanceStatus ?? "absent").ToArray();
                 var threshold = terms[classes.Single(c => c.AcademicClassId == g.Key).AcademicTermId].AcademicTermMinimumAttendance;
                 return AttendanceReporting.Summarize(g.Key, statuses, threshold);
             });
-            return Results.Ok(new { student_id = studentId, summaries, sessions = sessions.Select(s => new { session = s,
-                status = records.GetValueOrDefault(s.TeachingSessionId)?.SessionAttendanceStatus ?? "absent", attendance = records.GetValueOrDefault(s.TeachingSessionId) }) });
+            return Results.Ok(new { student_id = studentId, summaries,
+                sessions = sessions.Where(s => s.TeachingSessionEnd <= now).Select(s => new { session = s,
+                    status = records.GetValueOrDefault(s.TeachingSessionId)?.SessionAttendanceStatus ?? "absent", attendance = records.GetValueOrDefault(s.TeachingSessionId) }),
+                ongoing_sessions = sessions.Where(s => s.TeachingSessionEnd > now).Select(s => new { session = s,
+                    status = records.GetValueOrDefault(s.TeachingSessionId)?.SessionAttendanceStatus ?? "pending", attendance = records.GetValueOrDefault(s.TeachingSessionId) }) });
         });
         group.MapGet("/classes/{id:guid}/summary", async (Guid id, AcademicAccess access, BackendDbContext db, CancellationToken ct) =>
         {
@@ -100,9 +105,6 @@ public static class AcademicAttendanceEndpoints
                 from decision in decisions.DefaultIfEmpty() where studentId == null || decision.StudentId == studentId
                 orderby e.AttendanceReceivedAt descending select new { observation = e, decision }).Skip(Math.Max(0, offset ?? 0)).Take(100).ToListAsync(ct)))
             .RequireAuthorization(Roles.AdministratorPolicy);
-        endpoints.MapGet("/admin/audit-records", async (int? offset, BackendDbContext db, CancellationToken ct) =>
-            Results.Ok(await db.Set<AuditRecord>().AsNoTracking().OrderByDescending(a => a.AuditOccurredAt).ThenBy(a => a.AuditRecordId)
-                .Skip(Math.Max(0, offset ?? 0)).Take(100).ToListAsync(ct))).RequireAuthorization(Roles.AdministratorPolicy).WithTags("Audit");
     }
 
     private static IQueryable<Guid> Roster(BackendDbContext db, TeachingSession s) => db.Set<SessionRoster>().Where(r => r.TeachingSessionId == s.TeachingSessionId).Select(r => r.StudentId)

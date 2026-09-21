@@ -17,6 +17,19 @@ public static class EnrollmentEndpoints
     {
         var group = endpoints.MapGroup("/biometric-enrollments").WithTags("Biometric enrollment").RequireAuthorization("Academic")
             .AddEndpointFilter<AcademicMutationFilter>();
+        group.MapGet("/my-status", async (AcademicAccess access, BackendDbContext db, IConfiguration config, CancellationToken ct) =>
+        {
+            var student = await access.Student(ct);
+            var latest = await db.Set<BiometricEnrollment>().AsNoTracking().Where(e => e.StudentId == student.StudentId)
+                .OrderByDescending(e => e.BiometricEnrollmentCreatedAt).ThenByDescending(e => e.BiometricEnrollmentId).FirstOrDefaultAsync(ct);
+            var sampleCount = latest is null ? 0 : await db.Set<BiometricTemplate>().CountAsync(t => t.BiometricEnrollmentId == latest.BiometricEnrollmentId, ct);
+            var activeCount = await (from t in db.Set<BiometricTemplate>() join e in db.Set<BiometricEnrollment>() on t.BiometricEnrollmentId equals e.BiometricEnrollmentId
+                where e.StudentId == student.StudentId && e.BiometricEnrollmentStatus == "approved" && t.BiometricTemplateActive
+                    && t.BiometricTemplateModelSha256 == config["Biometrics:ModelSha256"] select t.BiometricTemplateId).CountAsync(ct);
+            // Enrollment readiness is not proof that any Edge device has installed a gallery.
+            return Results.Ok(new { latest_enrollment = latest, latest_sample_count = sampleCount,
+                active_sample_count = activeCount, required_samples = 12 });
+        }).RequireAuthorization(Roles.StudentPolicy);
         group.MapGet("/", async (AcademicAccess access, BackendDbContext db, CancellationToken ct) =>
         {
             var query = db.Set<BiometricEnrollment>().AsNoTracking();

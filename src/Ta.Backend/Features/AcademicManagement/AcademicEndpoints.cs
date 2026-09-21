@@ -60,6 +60,13 @@ public static class AcademicEndpoints
             await (from s in db.Set<Student>() join a in db.Set<Account>() on s.AccountId equals a.AccountId
                 orderby s.StudentNumber select new { student = s, a.AccountName, a.AccountStatus })
                 .Skip(Math.Max(0, (page ?? 1) - 1) * 100).Take(100).ToListAsync(ct)).RequireAuthorization(Roles.AdministratorPolicy);
+        group.MapGet("/advisees", async (AcademicAccess access, BackendDbContext db, CancellationToken ct) =>
+        {
+            var lecturer = await access.Lecturer(ct);
+            return await (from s in db.Set<Student>() join a in db.Set<Account>() on s.AccountId equals a.AccountId
+                where s.AdvisorLecturerId == lecturer.LecturerId
+                orderby s.StudentNumber select new { student = s, a.AccountName, a.AccountStatus }).ToListAsync(ct);
+        }).RequireAuthorization(Roles.StaffPolicy);
         group.MapGet("/lecturers", async (BackendDbContext db, CancellationToken ct) =>
             await (from l in db.Set<Lecturer>() join a in db.Set<Account>() on l.AccountId equals a.AccountId
                 orderby l.LecturerNumber select new { l.LecturerId, l.LecturerNumber, l.AccountId, a.AccountName }).ToListAsync(ct))

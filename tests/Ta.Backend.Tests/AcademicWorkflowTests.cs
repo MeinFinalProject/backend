@@ -81,6 +81,149 @@ public sealed class AcademicWorkflowTests(BackendFixture fixture) : IClassFixtur
         return new(studentClient, lecturerClient, Client(device.GetProperty("token").GetString()), student, lecturer, accountId, termId, classId, roomId, krsId, deviceId, email);
     }
 
+    [Fact]
+    public async Task Advisees_are_visible_only_to_the_assigned_lecturer()
+    {
+        var first = await Setup();
+        var second = await Setup();
+        var rows = await Ok(await first.LecturerClient.GetAsync(V1 + "/academic/advisees"));
+        var ids = rows.EnumerateArray().Select(r => r.GetProperty("student").GetProperty("student_id").GetGuid()).ToArray();
+        Assert.Contains(first.Student.StudentId, ids);
+        Assert.DoesNotContain(second.Student.StudentId, ids);
+        Assert.Equal(HttpStatusCode.Forbidden, (await first.StudentClient.GetAsync(V1 + "/academic/advisees")).StatusCode);
+        using var anonymous = Client();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(V1 + "/academic/advisees")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_creation_accepts_WIB_offsets_and_persists_the_same_instant_in_UTC()
+    {
+        var scenario = await Setup();
+        var start = DateTimeOffset.UtcNow.AddDays(3).ToOffset(TimeSpan.FromHours(7));
+        var response = await Ok(await Post(scenario.LecturerClient, $"/teaching/classes/{scenario.ClassId}/sessions",
+            new SessionRequest(scenario.RoomId, start, start.AddHours(2))));
+        Assert.Equal(start, response.GetProperty("teaching_session_start").GetDateTimeOffset());
+        Assert.Equal(TimeSpan.Zero, response.GetProperty("teaching_session_start").GetDateTimeOffset().Offset);
+        var from = Uri.EscapeDataString(start.AddMinutes(-1).ToString("O"));
+        var until = Uri.EscapeDataString(start.AddHours(3).ToString("O"));
+        var list = await Ok(await scenario.LecturerClient.GetAsync(V1 + $"/teaching/sessions?from={from}&until={until}"));
+        Assert.Contains(list.EnumerateArray(), item => item.GetProperty("teaching_session_id").GetGuid() == response.GetProperty("teaching_session_id").GetGuid());
+    }
+
+    [Fact]
+    public async Task Audit_filters_paginate_after_filtering_and_preserve_administrator_access()
+    {
+        using var s = await Setup();
+        using var admin = Client(fixture.AdminToken);
+        using var anonymous = Client();
+        var resource = Guid.NewGuid().ToString();
+        var at = new DateTimeOffset(2026, 6, 1, 3, 0, 0, TimeSpan.Zero);
+        await using (var db = fixture.OpenDatabase())
+        {
+            for (var i = 0; i < 101; i++) db.Add(new AuditRecord { AuditActor = s.Student.AccountId.ToString(),
+                AuditAction = "attendance.correct", AuditResource = resource, AuditOccurredAt = at.AddSeconds(i),
+                AuditDetails = "{\"reason\":\"Integration audit fixture\"}" });
+            db.Add(new AuditRecord { AuditAction = "account_status", AuditResource = resource, AuditOccurredAt = at });
+            await db.SaveChangesAsync();
+        }
+        var from = Uri.EscapeDataString(at.ToOffset(TimeSpan.FromHours(7)).ToString("O"));
+        var until = Uri.EscapeDataString(at.AddMinutes(2).ToOffset(TimeSpan.FromHours(7)).ToString("O"));
+        var path = V1 + $"/admin/audit-records?action=attendance.correct&resource={resource}&actor={s.Student.AccountId}&from={from}&until={until}";
+        var first = await Ok(await admin.GetAsync(path));
+        var second = await Ok(await admin.GetAsync(path + "&offset=100"));
+        Assert.Equal(100, first.GetArrayLength());
+        Assert.Single(second.EnumerateArray());
+        Assert.Equal("Student", first[0].GetProperty("actor_name").GetString());
+        Assert.Equal(at.AddSeconds(100), first[0].GetProperty("audit_occurred_at").GetDateTimeOffset());
+        Assert.DoesNotContain(first.EnumerateArray(), a => a.GetProperty("audit_record_id").GetGuid() == second[0].GetProperty("audit_record_id").GetGuid());
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.GetAsync(V1 + $"/admin/audit-records?from={until}&until={from}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await s.StudentClient.GetAsync(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await s.LecturerClient.GetAsync(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(path)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Ongoing_attendance_shows_confirmed_records_without_entering_completed_percentage()
+    {
+        using var s = await Setup();
+        using var other = await Setup();
+        _ = await HistoricalSession(s);
+        var ongoing = new TeachingSession { AcademicClassId = s.ClassId, LecturerId = s.Lecturer.LecturerId,
+            ClassroomId = s.RoomId, TeachingSessionStart = DateTimeOffset.UtcNow.AddMinutes(-10),
+            TeachingSessionEnd = DateTimeOffset.UtcNow.AddMinutes(50), TeachingSessionCourseName = "Ongoing fixture" };
+        await using (var db = fixture.OpenDatabase()) { db.Add(ongoing); await db.SaveChangesAsync(); }
+        var path = V1 + $"/attendance/students/{s.Student.StudentId}";
+        var before = await Ok(await s.StudentClient.GetAsync(path));
+        Assert.Single(before.GetProperty("ongoing_sessions").EnumerateArray());
+        Assert.Equal("pending", before.GetProperty("ongoing_sessions")[0].GetProperty("status").GetString());
+        Assert.Equal(1, before.GetProperty("summaries")[0].GetProperty("held_sessions").GetInt32());
+        await Ok(await Put(s.LecturerClient, $"/attendance/sessions/{ongoing.TeachingSessionId}/students/{s.Student.StudentId}",
+            new ManualAttendance("present", "Verified during class", 0)));
+        var after = await Ok(await s.StudentClient.GetAsync(path));
+        Assert.Equal("present", after.GetProperty("ongoing_sessions")[0].GetProperty("status").GetString());
+        Assert.Equal(0, after.GetProperty("summaries")[0].GetProperty("percentage").GetDecimal());
+        Assert.Equal(HttpStatusCode.Forbidden, (await other.StudentClient.GetAsync(path)).StatusCode);
+        await using (var db = fixture.OpenDatabase())
+        {
+            var row = await db.Set<TeachingSession>().SingleAsync(x => x.TeachingSessionId == ongoing.TeachingSessionId);
+            row.TeachingSessionStatus = "cancelled";
+            await db.SaveChangesAsync();
+        }
+        var cancelled = await Ok(await s.StudentClient.GetAsync(path));
+        Assert.Empty(cancelled.GetProperty("ongoing_sessions").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Report_sources_reject_students_and_unassigned_lecturers()
+    {
+        using var s = await Setup();
+        using var other = await Setup();
+        using var anonymous = Client();
+        using var admin = Client(fixture.AdminToken);
+        var session = await HistoricalSession(s);
+        foreach (var path in new[] { $"/attendance/sessions/{session.TeachingSessionId}", $"/attendance/classes/{s.ClassId}/summary" })
+        {
+            await Ok(await s.LecturerClient.GetAsync(V1 + path));
+            await Ok(await admin.GetAsync(V1 + path));
+            Assert.Equal(HttpStatusCode.Forbidden, (await s.StudentClient.GetAsync(V1 + path)).StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await other.LecturerClient.GetAsync(V1 + path)).StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(V1 + path)).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task Enrollment_status_is_own_only_and_reports_compatible_active_samples_without_embeddings()
+    {
+        using var s = await Setup();
+        using var other = await Setup();
+        using var anonymous = Client();
+        var endpoint = V1 + "/biometric-enrollments/my-status";
+        var empty = await Ok(await s.StudentClient.GetAsync(endpoint));
+        Assert.Equal(JsonValueKind.Null, empty.GetProperty("latest_enrollment").ValueKind);
+        var approved = new BiometricEnrollment { StudentId = s.Student.StudentId, BiometricEnrollmentStatus = "approved", BiometricEnrollmentCreatedAt = DateTimeOffset.UtcNow.AddDays(-1) };
+        var embedding = new byte[2048];
+        BitConverter.GetBytes(1f).CopyTo(embedding, 0);
+        await using (var db = fixture.OpenDatabase())
+        {
+            db.Add(approved);
+            db.Add(new BiometricTemplate { BiometricEnrollmentId = approved.BiometricEnrollmentId, BiometricTemplateActive = true,
+                BiometricTemplatePose = "frontal", BiometricTemplateModelSha256 = fixture.ModelHash, BiometricTemplateImageSha256 = new string('1', 64), BiometricTemplateEmbedding = embedding });
+            db.Add(new BiometricTemplate { BiometricEnrollmentId = approved.BiometricEnrollmentId, BiometricTemplateActive = true,
+                BiometricTemplatePose = "left", BiometricTemplateModelSha256 = new string('f', 64), BiometricTemplateImageSha256 = new string('2', 64), BiometricTemplateEmbedding = embedding });
+            await db.SaveChangesAsync();
+        }
+        await Ok(await Post(s.StudentClient, "/biometric-enrollments", new EnrollmentConsent(true, "research-v1")));
+        var status = await Ok(await s.StudentClient.GetAsync(endpoint));
+        Assert.Equal("draft", status.GetProperty("latest_enrollment").GetProperty("biometric_enrollment_status").GetString());
+        Assert.Equal(0, status.GetProperty("latest_sample_count").GetInt32());
+        Assert.Equal(1, status.GetProperty("active_sample_count").GetInt32());
+        Assert.DoesNotContain("embedding", status.GetRawText());
+        var otherStatus = await Ok(await other.StudentClient.GetAsync(endpoint));
+        Assert.Equal(0, otherStatus.GetProperty("active_sample_count").GetInt32());
+        Assert.Equal(HttpStatusCode.Forbidden, (await s.LecturerClient.GetAsync(endpoint)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync(endpoint)).StatusCode);
+    }
+
     // Controlled historical fixtures avoid sleeping or adding backdating capabilities to production APIs.
     private async Task<TeachingSession> HistoricalSession(Scenario s)
     {
@@ -269,6 +412,21 @@ public sealed class AcademicWorkflowTests(BackendFixture fixture) : IClassFixtur
         var report = await Ok(await s.StudentClient.GetAsync(V1 + $"/attendance/students/{s.Student.StudentId}"));
         Assert.Equal(JsonValueKind.Null, report.GetProperty("summaries")[0].GetProperty("percentage").ValueKind);
         Assert.Equal(HttpStatusCode.Forbidden, (await other.StudentClient.GetAsync(V1 + $"/attendance/students/{s.Student.StudentId}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Manual_correction_accepts_WIB_checkin_time_without_changing_the_instant()
+    {
+        using var scenario = await Setup();
+        var session = await HistoricalSession(scenario);
+        var occurredAt = session.TeachingSessionStart.AddMinutes(5).ToOffset(TimeSpan.FromHours(7));
+        var path = $"/attendance/sessions/{session.TeachingSessionId}/students/{scenario.Student.StudentId}";
+        await Ok(await Put(scenario.LecturerClient, path, new ManualAttendance("present", "Verified check-in time", 0, occurredAt)));
+        await using var db = fixture.OpenDatabase();
+        var saved = await db.Set<SessionAttendance>().SingleAsync(a => a.TeachingSessionId == session.TeachingSessionId);
+        // PostgreSQL persists timestamps at microsecond precision.
+        Assert.InRange(Math.Abs((saved.SessionAttendanceOccurredAt!.Value - occurredAt).Ticks), 0, 9);
+        Assert.Equal(TimeSpan.Zero, saved.SessionAttendanceOccurredAt.Value.Offset);
     }
 
     [Fact]

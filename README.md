@@ -77,6 +77,22 @@ The backend does not download a second ArcFace model or require a `models/` dire
 
 An uploaded photo follows `NativeEmbeddingExtractor` → `.local/enrollment-worker/Release/enrollment_worker.exe` → SCRFD/ArcFace → a 512-dimensional embedding stored in PostgreSQL. The backend needs SCRFD and ArcFace for enrollment; the Edge runtime additionally uses the PAD model when recognizing a live person.
 
+## Frontend integration
+
+The React frontend runs separately at `http://localhost:5173/login` during development. Start it from its checkout with `npm ci` and `npm run dev`. Its Vite proxy forwards `/api` to this API over trusted HTTPS; browser requests remain on one origin and do not require permissive CORS settings.
+
+Use approved human accounts for the portal. Device and administrator bootstrap credentials are not frontend login credentials. Browser URLs and technical documentation use English; application labels use Bahasa Indonesia.
+
+`GET /api/v1/academic/advisees` exposes only the authenticated lecturer's advised students. Session creation, session date filters, and optional manual check-in timestamps accept explicit timezone offsets and are normalized to UTC before PostgreSQL queries or persistence. These integration boundaries have regression coverage.
+
+The portal's guided camera capture sends the same JPEG/PNG multipart request as file uploads. Extraction, ownership checks, sample limits, consent, review, and publication stay in the existing enrollment workflow; camera permission and preview handling belong to the browser.
+
+`GET /api/v1/biometric-enrollments/my-status` is student-only and returns the student's latest enrollment, its saved sample count, and the count of active samples in approved enrollments matching the current model. It never returns embeddings and does not claim that an Edge device has installed the gallery. The existing student attendance response now adds `ongoing_sessions`, containing eligible sessions whose early window has opened and whose end has not passed. Their confirmed status or `pending` state is separate from completed `sessions` and percentage calculations; cancelled sessions remain excluded.
+
+`GET /api/v1/admin/audit-records` retains its administrator-only array/offset contract and accepts exact `action`, `actor`, and `resource` filters plus inclusive `from` and exclusive `until` timestamps. Filters run before the 100-row pagination limit. Explicit offsets are normalized to UTC. Each result adds `actor_name` from the current account profile where available; the stored actor ID and audit payload remain unchanged. The audit interface covers the actions already recorded by the backend, not all system activity.
+
+Attendance CSV exports reuse the authorized session roster and class summary endpoints. Assigned lecturers and administrators have access; students and unassigned lecturers cannot retrieve those report sources. No new report persistence or database migration is required. Device heartbeat and gallery-install monitoring remain a separate cross-repository capability.
+
 ## Configuration
 
 Development secrets use the ID `ta-backend-development`. The setup script restricts access to that application's user-secrets directory. Do not commit credentials or connection strings.
@@ -301,7 +317,7 @@ The separate [Edge integration test](#edge-integration) requires the running dev
 
 ## Scope and remaining experiments
 
-- Build administrator, lecturer, and student frontend workflows against the versioned API.
+- The separate frontend implements administrator, lecturer, and student workflows, including guided camera enrollment, audit inspection, CSV reports, and ongoing attendance status. Validate deployment settings and real institutional workflows before field use.
 - Collect consented, genuinely varied enrollment samples and test recognition with the actual laboratory camera and students.
 - Evaluate latency, recognition thresholds, liveness, and offline recovery under field conditions. Native compatibility and transaction tests do not establish biometric accuracy.
 - Edge currently sends verification metadata, not photographic evidence, spoof notifications, a heartbeat, or gallery-install acknowledgements. Device activity reports the latest received observation; it does not claim live connectivity.

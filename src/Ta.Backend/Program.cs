@@ -9,6 +9,7 @@ using Ta.Backend.Features.Devices;
 using Ta.Backend.Persistence;
 using Ta.Backend.Features.Identity;
 using Ta.Backend.Features.AcademicManagement;
+using Ta.Backend.Features.Audit;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Backend")
@@ -120,6 +121,7 @@ v1.MapSessionEndpoints();
 v1.MapAcademicAttendanceEndpoints();
 v1.MapDeviceAcademicEndpoints();
 v1.MapEnrollmentEndpoints();
+v1.MapAuditEndpoints();
 app.MapApiDocumentation();
 app.Run();
 
