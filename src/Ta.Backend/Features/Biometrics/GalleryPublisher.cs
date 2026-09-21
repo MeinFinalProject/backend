@@ -11,6 +11,7 @@ namespace Ta.Backend.Features.Biometrics;
 
 public sealed class GalleryPublisher(BackendDbContext db, IConfiguration configuration)
 {
+    public bool Published { get; private set; }
     // Caller owns the academic transaction. Flush template changes before constructing the snapshot.
     public async Task<GalleryPublication> Publish(CancellationToken ct)
     {
@@ -30,6 +31,7 @@ public sealed class GalleryPublisher(BackendDbContext db, IConfiguration configu
         var etag = '"' + Credentials.Hash(json) + '"';
         db.Add(new GalleryRelease { GalleryVersion = version, GalleryModelSha256 = modelHash, GalleryDocument = json,
             GalleryEtag = etag, GalleryTemplateCount = templates.Count, GalleryPublishedAt = DateTimeOffset.UtcNow });
+        Published = true;
         return new(version, etag, "published");
     }
 }

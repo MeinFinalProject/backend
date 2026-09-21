@@ -32,7 +32,7 @@ public static class DeviceAcademicEndpoints
                 .Select(e => new { e.AttendanceReceivedAt, e.AttendanceOccurredAt, e.AttendanceGalleryVersion }).FirstOrDefaultAsync(ct);
             var assignments = await db.Set<DeviceRoomAssignment>().AsNoTracking().Where(a => a.DeviceId == deviceId).OrderByDescending(a => a.DeviceRoomAssignmentValidFrom).Take(100).ToListAsync(ct);
             return Results.Ok(new { device_id = deviceId, latest_received_observation = latest, room_assignments = assignments,
-                heartbeat_supported = false, gallery_acknowledgement_supported = false });
+                heartbeat_supported = true, gallery_acknowledgement_supported = true });
         });
     }
 }

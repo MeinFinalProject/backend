@@ -11,6 +11,7 @@ try {
     $env:PGPASSWORD = $password
     $sql = @'
 GRANT SELECT, INSERT, UPDATE ON device TO ta_backend_app;
+GRANT SELECT, INSERT, UPDATE ON device_operational_status TO ta_backend_app;
 GRANT SELECT, INSERT ON attendance_event, gallery_release TO ta_backend_app;
 GRANT SELECT, INSERT ON attendance_decision, audit_record TO ta_backend_app;
 GRANT SELECT, INSERT, UPDATE ON account, account_session, study_program, academic_term, course,

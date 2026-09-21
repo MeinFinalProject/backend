@@ -62,6 +62,23 @@ public sealed class BackendDbContext(DbContextOptions<BackendDbContext> options)
             b.HasIndex(e => new { e.DeviceId, e.AttendanceOccurredAt }).HasDatabaseName("ix_attendance_device_occurred_at");
             b.HasIndex(e => new { e.AttendanceIdentityId, e.AttendanceOccurredAt }).HasDatabaseName("ix_attendance_identity_occurred_at");
         });
+        model.Entity<DeviceOperationalStatus>(b =>
+        {
+            b.ToTable("device_operational_status", t =>
+            {
+                t.HasCheckConstraint("ck_device_operational_counts", "device_installed_template_count BETWEEN 0 AND 10000 AND device_outbox_pending_count >= 0 AND device_outbox_dead_count >= 0");
+                t.HasCheckConstraint("ck_device_operational_frame_age", "device_frame_age_ms IS NULL OR device_frame_age_ms BETWEEN 0 AND 86400000");
+                t.HasCheckConstraint("ck_device_operational_state", "device_runtime_state IN ('starting','running','persistence_blocked','gallery_error','stopping')");
+                t.HasCheckConstraint("ck_device_operational_model", "device_model_sha256 ~ '^[0-9a-f]{64}$'");
+            });
+            b.HasKey(s => s.DeviceId).HasName("pk_device_operational_status");
+            b.Property(s => s.DeviceId).HasMaxLength(256);
+            b.Property(s => s.DeviceRuntimeState).HasMaxLength(32);
+            b.Property(s => s.DeviceInstalledGalleryVersion).HasMaxLength(256);
+            b.Property(s => s.DeviceModelSha256).HasMaxLength(64);
+            b.HasOne<Device>().WithOne().HasForeignKey<DeviceOperationalStatus>(s => s.DeviceId)
+                .OnDelete(DeleteBehavior.Cascade).HasConstraintName("fk_device_operational_status_device");
+        });
         model.ConfigureAcademic();
         foreach (var entity in model.Model.GetEntityTypes())
             foreach (var property in entity.GetProperties())

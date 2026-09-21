@@ -87,6 +87,8 @@ public static class AttendanceEndpoints
         }
         // Never acknowledge before COMMIT: an uncertain response can safely be retried.
         await transaction.CommitAsync(ct);
+        if (receipts.Any(r => r.Status == "accepted"))
+            context.RequestServices.GetRequiredService<Ta.Backend.Features.Realtime.RealtimeUpdates>().AcademicCommitted();
         return Results.Ok(new AttendanceBatchReceipt(1, receipts));
     }
 

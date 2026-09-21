@@ -10,6 +10,7 @@ using Ta.Backend.Persistence;
 using Ta.Backend.Features.Identity;
 using Ta.Backend.Features.AcademicManagement;
 using Ta.Backend.Features.Audit;
+using Ta.Backend.Features.Realtime;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Backend")
@@ -35,6 +36,13 @@ builder.Services.AddScoped<AcademicAccess>();
 builder.Services.AddScoped<SessionService>();
 builder.Services.AddScoped<AttendanceEvaluator>();
 builder.Services.AddScoped<GalleryPublisher>();
+builder.Services.AddSingleton<DeviceConnections>();
+builder.Services.AddSingleton<PortalConnections>();
+builder.Services.AddSingleton<RealtimeUpdates>();
+builder.Services.AddHostedService(p => p.GetRequiredService<RealtimeUpdates>());
+builder.Services.AddSignalR(o => { o.MaximumReceiveMessageSize = 4096; o.EnableDetailedErrors = false; });
+// SignalR browser transports carry their bearer token in a query parameter. Never log request URLs here.
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
 builder.Services.AddSingleton<IEmbeddingExtractor, NativeEmbeddingExtractor>();
 builder.Services.AddAuthentication(Credentials.DeviceScheme)
     .AddScheme<AuthenticationSchemeOptions, BearerAuthenticationHandler>(Credentials.DeviceScheme, _ => { })
@@ -73,6 +81,12 @@ app.Use(async (context, next) =>
         if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 1024 * 1024;
     }
     try { await next(context); }
+    catch (Exception e) when (context.Response.HasStarted)
+    {
+        if (e is not OperationCanceledException)
+            app.Logger.LogWarning("Streaming request ended ({ErrorType}); trace {TraceId}", e.GetType().Name, context.TraceIdentifier);
+        context.Abort();
+    }
     catch (DomainException e)
     {
         context.Response.Clear();
@@ -102,6 +116,7 @@ app.Use(async (context, next) =>
     }
 });
 app.UseRateLimiter();
+app.UseWebSockets();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" })).ExcludeFromDescription();
@@ -112,6 +127,8 @@ app.MapGet("/health/ready", async (BackendDbContext db, CancellationToken ct) =>
 }).ExcludeFromDescription();
 var v1 = app.MapGroup(ApiRoutes.V1).WithGroupName("v1");
 v1.MapDeviceEndpoints();
+v1.MapDeviceRealtimeEndpoints();
+v1.MapHub<PortalHub>("/live", o => o.CloseOnAuthenticationExpiration = true).RequireAuthorization(Roles.HumanPolicy);
 v1.MapGalleryEndpoints();
 v1.MapAttendanceEndpoints();
 v1.MapIdentityEndpoints();

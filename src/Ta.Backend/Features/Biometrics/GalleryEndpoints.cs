@@ -62,6 +62,7 @@ public static class GalleryEndpoints
             AuditLog.Add(db, context.User, "gallery.publish_document", document.GalleryVersion, new { templates = document.Templates.Length });
             await db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
+            context.RequestServices.GetRequiredService<Ta.Backend.Features.Realtime.RealtimeUpdates>().GalleryCommitted();
             return Results.Created($"{ApiRoutes.V1}/gallery", new GalleryPublication(document.GalleryVersion, etag, "published"));
         }).RequireAuthorization(Credentials.AdminScheme).WithTags("Biometrics")
             .WithName("PublishGallery").WithSummary("Publish an immutable gallery release")

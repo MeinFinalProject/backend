@@ -91,7 +91,27 @@ The portal's guided camera capture sends the same JPEG/PNG multipart request as 
 
 `GET /api/v1/admin/audit-records` retains its administrator-only array/offset contract and accepts exact `action`, `actor`, and `resource` filters plus inclusive `from` and exclusive `until` timestamps. Filters run before the 100-row pagination limit. Explicit offsets are normalized to UTC. Each result adds `actor_name` from the current account profile where available; the stored actor ID and audit payload remain unchanged. The audit interface covers the actions already recorded by the backend, not all system activity.
 
-Attendance CSV exports reuse the authorized session roster and class summary endpoints. Assigned lecturers and administrators have access; students and unassigned lecturers cannot retrieve those report sources. No new report persistence or database migration is required. Device heartbeat and gallery-install monitoring remain a separate cross-repository capability.
+Attendance CSV exports reuse the authorized session roster and class summary endpoints. Assigned lecturers and administrators have access; students and unassigned lecturers cannot retrieve those report sources. Exports do not add separate report persistence.
+
+## Hybrid real-time integration
+
+The application uses three complementary channels:
+
+| Channel | Responsibility |
+| --- | --- |
+| Native Windows WebSocket, `/api/v1/device-channel` | Authenticated operational reports and gallery reconciliation hints |
+| Existing HTTPS APIs | ETag gallery downloads and durable, idempotent attendance delivery |
+| SignalR, `/api/v1/live` | Portal cache invalidation; authorized HTTP APIs remain the source of truth |
+
+Edge uses the existing API base URL and DPAPI credential. No additional token or service is required. It sends a status report every ten seconds, after reading the runtime's installed gallery state. The `device_operational_status` table stores one latest report per device, with server receipt time; it does not accumulate heartbeat history. Administrator-only `GET /api/v1/admin/devices/operational-status` returns connectivity, health, readiness, reasons, the latest report and the expected gallery version.
+
+A device is connected only while its authenticated socket belongs to this server process and its latest message is under 45 seconds old. Replacing a connection invalidates its predecessor and resets readiness until a new report arrives. Health also requires a running runtime, a frame age under 20 seconds (including time since receipt), and no retained delivery rejections. Readiness additionally requires an active room assignment and a nonempty installed gallery matching the latest version, model and template count. Pending outbox events are shown separately. These are operational checks, not guarantees of biometric accuracy or academic eligibility.
+
+Device messages are bounded to 4 KiB and contain only `schema_version: 1`, `type: "status"`, `runtime_state`, nullable `frame_age_ms`, `installed_gallery_version`, `model_sha256`, `installed_template_count`, `outbox_pending_count`, and `outbox_dead_count`. The server replies with `{"schema_version":1,"type":"status_ack"}` after persistence. It sends `{"schema_version":1,"type":"reconcile"}` on connection and after a gallery transaction commits. Reconciliation requests a normal authenticated HTTP download; it never carries templates. Edge reports installation only after the owner thread successfully replaces the active gallery.
+
+SignalR emits `invalidate` with a topic (`academic` or `devices`), never application records. Device invalidations go only to administrators; approved human sessions receive coarse academic invalidations and refetch their own authorized data. Notifications are coalesced after commit and are deliberately nondurable: reconnect refresh and HTTP polling recover missed notifications. Device and human credentials are revalidated every two seconds, including revocation, disablement, expiry and role changes. Authorization/database failures close live connections. Device tokens are accepted only in the Authorization header; human query tokens are accepted only on the exact SignalR transport path. Configure any reverse proxy to support WebSocket upgrades, allow idle connections for at least 60 seconds, and redact query strings from access logs. The host suppresses request-URL diagnostics for this reason.
+
+Connection ownership is in memory in this single-process modular monolith. Run one backend instance for this prototype; multiple instances would require shared connection ownership and notification distribution. Restarting the host leaves historical reports available but marks every device disconnected until it reconnects. No broker or persistent notification queue is required for the current deployment.
 
 ## Configuration
 
@@ -272,6 +292,7 @@ src/Ta.Backend/
     Biometrics/          Native enrollment, templates, gallery distribution
     Attendance/          Raw ingestion, academic decisions, corrections, reports
     Audit/               Append-only operation and correction records
+    Realtime/            Authorized SignalR invalidation and connection revalidation
   Persistence/           EF Core mappings and migrations
 tests/
   Ta.Backend.Tests/      HTTP integration and validation tests
@@ -320,5 +341,5 @@ The separate [Edge integration test](#edge-integration) requires the running dev
 - The separate frontend implements administrator, lecturer, and student workflows, including guided camera enrollment, audit inspection, CSV reports, and ongoing attendance status. Validate deployment settings and real institutional workflows before field use.
 - Collect consented, genuinely varied enrollment samples and test recognition with the actual laboratory camera and students.
 - Evaluate latency, recognition thresholds, liveness, and offline recovery under field conditions. Native compatibility and transaction tests do not establish biometric accuracy.
-- Edge currently sends verification metadata, not photographic evidence, spoof notifications, a heartbeat, or gallery-install acknowledgements. Device activity reports the latest received observation; it does not claim live connectivity.
+- Operational telemetry and installed-gallery acknowledgements are available. Photographic evidence and spoof-alert workflows remain outside the current integration; live readiness does not establish recognition accuracy.
 - Email delivery/recovery, institutional SSO, discipline, tuition, and unrelated university administration are outside this prototype.

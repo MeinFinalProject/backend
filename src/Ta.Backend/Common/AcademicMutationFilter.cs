@@ -34,6 +34,14 @@ public sealed class AcademicMutationFilter(BackendDbContext db) : IEndpointFilte
                 context.HttpContext.Request.Path.ToString());
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
+        if (status < 400)
+        {
+            var services = context.HttpContext.RequestServices;
+            var updates = services.GetRequiredService<Ta.Backend.Features.Realtime.RealtimeUpdates>();
+            updates.AcademicCommitted();
+            if (services.GetRequiredService<Ta.Backend.Features.Biometrics.GalleryPublisher>().Published)
+                updates.GalleryCommitted();
+        }
         return result;
     }
 }
