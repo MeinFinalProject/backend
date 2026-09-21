@@ -62,6 +62,7 @@ public sealed class BackendDbContext(DbContextOptions<BackendDbContext> options)
             b.HasIndex(e => new { e.DeviceId, e.AttendanceOccurredAt }).HasDatabaseName("ix_attendance_device_occurred_at");
             b.HasIndex(e => new { e.AttendanceIdentityId, e.AttendanceOccurredAt }).HasDatabaseName("ix_attendance_identity_occurred_at");
         });
+        model.ConfigureAcademic();
         foreach (var entity in model.Model.GetEntityTypes())
             foreach (var property in entity.GetProperties())
                 property.SetColumnName(JsonNamingPolicy.SnakeCaseLower.ConvertName(property.Name));

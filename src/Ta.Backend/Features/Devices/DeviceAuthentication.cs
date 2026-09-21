@@ -50,6 +50,8 @@ public sealed class BearerAuthenticationHandler(
             subject = device.DeviceId;
         }
         var identity = new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, subject)], Scheme.Name);
+        if (Scheme.Name == Credentials.AdminScheme)
+            identity.AddClaim(new Claim(ClaimTypes.Role, "administrator"));
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name));
     }
 

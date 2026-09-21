@@ -9,7 +9,8 @@ public static class DeviceEndpoints
 {
     public static void MapDeviceEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        var group = endpoints.MapGroup("/admin/devices").WithTags("Devices").RequireAuthorization(Credentials.AdminScheme);
+        var group = endpoints.MapGroup("/admin/devices").WithTags("Devices").RequireAuthorization(Credentials.AdminScheme)
+            .AddEndpointFilter<AcademicMutationFilter>();
         group.MapGet("/", async (BackendDbContext db, CancellationToken ct) =>
             await db.Devices.OrderBy(d => d.DeviceId).Select(d => new DeviceSummary(
                 d.DeviceId, d.DeviceName, d.DeviceEnabled, d.DeviceCreatedAt, d.DeviceCredentialChangedAt)).ToListAsync(ct))
@@ -22,6 +23,7 @@ public static class DeviceEndpoints
                 || request.DeviceName.Length > 200) return Results.BadRequest(new { error = "invalid_device" });
             var token = Credentials.Generate();
             var now = DateTimeOffset.UtcNow;
+            if (await db.Devices.AnyAsync(d => d.DeviceId == request.DeviceId, ct)) return Results.Conflict(new { error = "device_exists" });
             db.Devices.Add(new Device
             {
                 DeviceId = request.DeviceId,
@@ -30,9 +32,7 @@ public static class DeviceEndpoints
                 DeviceCreatedAt = now,
                 DeviceCredentialChangedAt = now
             });
-            try { await db.SaveChangesAsync(ct); }
-            catch (DbUpdateException e) when (e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
-            { return Results.Conflict(new { error = "device_exists" }); }
+            await db.SaveChangesAsync(ct);
             context.Response.Headers.CacheControl = "no-store";
             return Results.Created($"{ApiRoutes.V1}/admin/devices/{Uri.EscapeDataString(request.DeviceId)}", new DeviceCredential(request.DeviceId, token));
         }).WithName("RegisterDevice").WithSummary("Register a device and issue its credential")

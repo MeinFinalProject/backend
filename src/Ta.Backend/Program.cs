@@ -7,6 +7,8 @@ using Ta.Backend.Features.Attendance;
 using Ta.Backend.Features.Biometrics;
 using Ta.Backend.Features.Devices;
 using Ta.Backend.Persistence;
+using Ta.Backend.Features.Identity;
+using Ta.Backend.Features.AcademicManagement;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Backend")
@@ -27,12 +29,24 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 builder.Services.AddDbContext<BackendDbContext>(o => o.UseNpgsql(connectionString,
     pg => pg.MigrationsHistoryTable("ef_migration_history")));
 builder.Services.AddApiDocumentation();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<AcademicAccess>();
+builder.Services.AddScoped<SessionService>();
+builder.Services.AddScoped<AttendanceEvaluator>();
+builder.Services.AddScoped<GalleryPublisher>();
+builder.Services.AddSingleton<IEmbeddingExtractor, NativeEmbeddingExtractor>();
 builder.Services.AddAuthentication(Credentials.DeviceScheme)
     .AddScheme<AuthenticationSchemeOptions, BearerAuthenticationHandler>(Credentials.DeviceScheme, _ => { })
-    .AddScheme<AuthenticationSchemeOptions, BearerAuthenticationHandler>(Credentials.AdminScheme, _ => { });
+    .AddScheme<AuthenticationSchemeOptions, BearerAuthenticationHandler>(Credentials.AdminScheme, _ => { })
+    .AddScheme<AuthenticationSchemeOptions, HumanAuthentication>(Roles.HumanScheme, _ => { });
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy(Credentials.DeviceScheme, p => p.AddAuthenticationSchemes(Credentials.DeviceScheme).RequireAuthenticatedUser())
-    .AddPolicy(Credentials.AdminScheme, p => p.AddAuthenticationSchemes(Credentials.AdminScheme).RequireAuthenticatedUser());
+    .AddPolicy(Credentials.AdminScheme, p => p.AddAuthenticationSchemes(Credentials.AdminScheme, Roles.HumanScheme).RequireRole(Roles.Administrator))
+    .AddPolicy(Roles.AdministratorPolicy, p => p.AddAuthenticationSchemes(Credentials.AdminScheme, Roles.HumanScheme).RequireRole(Roles.Administrator))
+    .AddPolicy(Roles.HumanPolicy, p => p.AddAuthenticationSchemes(Roles.HumanScheme).RequireAuthenticatedUser())
+    .AddPolicy("Academic", p => p.AddAuthenticationSchemes(Credentials.AdminScheme, Roles.HumanScheme).RequireAuthenticatedUser())
+    .AddPolicy(Roles.StaffPolicy, p => p.AddAuthenticationSchemes(Credentials.AdminScheme, Roles.HumanScheme).RequireRole(Roles.Administrator, Roles.Lecturer))
+    .AddPolicy(Roles.StudentPolicy, p => p.AddAuthenticationSchemes(Roles.HumanScheme).RequireRole(Roles.Student));
 builder.Services.AddRateLimiter(o =>
 {
     o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
@@ -58,6 +72,12 @@ app.Use(async (context, next) =>
         if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 1024 * 1024;
     }
     try { await next(context); }
+    catch (DomainException e)
+    {
+        context.Response.Clear();
+        context.Response.StatusCode = e.Status;
+        await context.Response.WriteAsJsonAsync(new { error = e.Message });
+    }
     catch (Exception e) when (e is NpgsqlException or DbUpdateException)
     {
         app.Logger.LogError("Database request failed ({ErrorType}); trace {TraceId}", e.GetType().Name, context.TraceIdentifier);
@@ -93,6 +113,13 @@ var v1 = app.MapGroup(ApiRoutes.V1).WithGroupName("v1");
 v1.MapDeviceEndpoints();
 v1.MapGalleryEndpoints();
 v1.MapAttendanceEndpoints();
+v1.MapIdentityEndpoints();
+v1.MapAcademicEndpoints();
+v1.MapRegistrationEndpoints();
+v1.MapSessionEndpoints();
+v1.MapAcademicAttendanceEndpoints();
+v1.MapDeviceAcademicEndpoints();
+v1.MapEnrollmentEndpoints();
 app.MapApiDocumentation();
 app.Run();
 

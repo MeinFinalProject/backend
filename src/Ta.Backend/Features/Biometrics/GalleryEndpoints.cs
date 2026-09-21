@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Net.Http.Headers;
 using Ta.Backend.Common;
 using Ta.Backend.Features.Devices;
+using Ta.Backend.Features.Audit;
 using Ta.Backend.Persistence;
 
 namespace Ta.Backend.Features.Biometrics;
@@ -33,7 +34,7 @@ public static class GalleryEndpoints
             .Produces<GalleryDocument>().Produces(StatusCodes.Status304NotModified);
 
         endpoints.MapPost("/admin/gallery-releases", async (GalleryDocument document, IConfiguration configuration,
-            BackendDbContext db, CancellationToken ct) =>
+            BackendDbContext db, HttpContext context, CancellationToken ct) =>
         {
             var error = document.Validate(configuration["Biometrics:ModelSha256"]!);
             if (error is not null) return Results.BadRequest(new { error });
@@ -58,6 +59,7 @@ public static class GalleryEndpoints
                 GalleryTemplateCount = document.Templates.Length,
                 GalleryPublishedAt = DateTimeOffset.UtcNow
             });
+            AuditLog.Add(db, context.User, "gallery.publish_document", document.GalleryVersion, new { templates = document.Templates.Length });
             await db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
             return Results.Created($"{ApiRoutes.V1}/gallery", new GalleryPublication(document.GalleryVersion, etag, "published"));

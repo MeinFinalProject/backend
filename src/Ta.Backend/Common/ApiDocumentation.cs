@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Microsoft.OpenApi;
 using Ta.Backend.Features.Attendance;
 using Ta.Backend.Features.Devices;
+using Ta.Backend.Features.Identity;
 
 namespace Ta.Backend.Common;
 
@@ -18,27 +19,31 @@ public static class ApiDocumentation
                 {
                     Title = "TA Backend API",
                     Version = "v1",
-                    Description = "Device management, biometric gallery distribution, and attendance event ingestion."
+                    Description = "Academic enrollment, teaching sessions, attendance, biometric enrollment, and autonomous Edge integration. All dates use ISO 8601; timestamps include an offset."
                 };
                 document.Components ??= new OpenApiComponents();
                 document.Components.SecuritySchemes = new Dictionary<string, IOpenApiSecurityScheme>
                 {
                     [Credentials.DeviceScheme] = Bearer("Device credential issued through device registration."),
-                    [Credentials.AdminScheme] = Bearer("Administration token configured for this backend.")
+                    [Credentials.AdminScheme] = Bearer("Bootstrap administration token configured for this backend."),
+                    [Roles.HumanScheme] = Bearer("Revocable account access_token returned by POST /api/v1/auth/login.")
                 };
                 return Task.CompletedTask;
             });
             options.AddOperationTransformer((operation, context, _) =>
             {
-                var policy = context.Description.ActionDescriptor.EndpointMetadata
+                var policies = context.Description.ActionDescriptor.EndpointMetadata
                     .OfType<IAuthorizeData>().Select(a => a.Policy)
-                    .FirstOrDefault(p => p is Credentials.DeviceScheme or Credentials.AdminScheme);
-                if (policy is not null)
+                    .Where(p => !string.IsNullOrEmpty(p)).ToArray();
+                if (policies.Length > 0)
                 {
-                    operation.Security = [new OpenApiSecurityRequirement
-                    {
-                        [new OpenApiSecuritySchemeReference(policy, context.Document)] = []
-                    }];
+                    // Group and endpoint policies both apply; a student-only endpoint
+                    // cannot use the bootstrap credential allowed by its parent group.
+                    string[] schemes = policies.Contains(Credentials.DeviceScheme) ? [Credentials.DeviceScheme]
+                        : policies.Contains(Roles.StudentPolicy) || policies.Contains(Roles.HumanPolicy) ? [Roles.HumanScheme]
+                        : [Credentials.AdminScheme, Roles.HumanScheme];
+                    operation.Security = schemes.Select(scheme => new OpenApiSecurityRequirement
+                        { [new OpenApiSecuritySchemeReference(scheme, context.Document)] = [] }).ToList();
                     operation.Responses ??= new OpenApiResponses();
                     operation.Responses.TryAdd("401", new OpenApiResponse { Description = "Missing, invalid, or disabled credential." });
                     operation.Responses.TryAdd("403", new OpenApiResponse { Description = "The credential cannot perform this operation." });

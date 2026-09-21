@@ -21,7 +21,7 @@ public static class AttendanceEndpoints
         .Produces<AttendanceBatchReceipt>().Produces<ApiError>(StatusCodes.Status400BadRequest)
         .Produces(StatusCodes.Status413PayloadTooLarge);
 
-    private static async Task<IResult> Ingest(AttendanceEnvelope batch, HttpContext context, BackendDbContext db, CancellationToken ct)
+    private static async Task<IResult> Ingest(AttendanceEnvelope batch, HttpContext context, BackendDbContext db, AttendanceEvaluator evaluator, CancellationToken ct)
     {
         if (batch.DeviceId != context.User.FindFirstValue(ClaimTypes.NameIdentifier)) return Results.Forbid();
         if (batch.SchemaVersion != 1 || batch.Events is null || batch.Events.Length is < 1 or > 256)
@@ -38,6 +38,7 @@ public static class AttendanceEndpoints
 
         var receipts = new List<EventReceipt>();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await AcademicMutationFilter.Lock(db, ct);
         // Sorting locks avoids deadlocks for concurrent overlapping batches. ACK order is irrelevant to Edge.
         foreach (var item in batch.Events.OrderBy(e => LockOrder(e.GetProperty("event_id").GetString()!), StringComparer.Ordinal))
         {
@@ -71,7 +72,12 @@ public static class AttendanceEndpoints
                         {observation.OccurredAt}, {receivedAt}, CAST({payload} AS jsonb), {hash})
                 ON CONFLICT (attendance_event_id) DO NOTHING
                 """, ct);
-            if (inserted == 1) receipts.Add(new(id, "accepted"));
+            if (inserted == 1)
+            {
+                await evaluator.Evaluate(eventId, observation, ct);
+                await db.SaveChangesAsync(ct);
+                receipts.Add(new(id, "accepted"));
+            }
             else
             {
                 var existing = await db.AttendanceEvents.AsNoTracking().SingleAsync(e => e.AttendanceEventId == eventId, ct);

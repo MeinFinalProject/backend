@@ -18,7 +18,9 @@ public sealed class ApiDocumentationTests(BackendFixture fixture) : IClassFixtur
         var root = json.RootElement;
         Assert.Equal("v1", root.GetProperty("info").GetProperty("version").GetString());
         var paths = root.GetProperty("paths");
-        Assert.Equal(6, paths.EnumerateObject().Count());
+        Assert.True(paths.EnumerateObject().Count() > 40);
+        Assert.True(paths.TryGetProperty("/api/v1/auth/login", out _));
+        Assert.True(paths.TryGetProperty("/api/v1/biometric-enrollments/{id}/samples", out _));
         Assert.All(paths.EnumerateObject(), p => Assert.StartsWith("/api/v1/", p.Name));
         var gallery = paths.GetProperty("/api/v1/gallery").GetProperty("get");
         Assert.True(gallery.GetProperty("security")[0].TryGetProperty("Device", out _));
@@ -32,6 +34,13 @@ public sealed class ApiDocumentationTests(BackendFixture fixture) : IClassFixtur
         var schemes = root.GetProperty("components").GetProperty("securitySchemes");
         Assert.Equal("bearer", schemes.GetProperty("Device").GetProperty("scheme").GetString());
         Assert.Equal("bearer", schemes.GetProperty("Administrator").GetProperty("scheme").GetString());
+        var enrollment = paths.EnumerateObject().Single(p => p.Name.TrimEnd('/') == "/api/v1/biometric-enrollments").Value.GetProperty("post");
+        var studentSecurity = enrollment.GetProperty("security");
+        Assert.Equal(1, studentSecurity.GetArrayLength());
+        Assert.True(studentSecurity[0].TryGetProperty("Human", out _));
+        var reviewSecurity = paths.GetProperty("/api/v1/biometric-enrollments/{id}/review").GetProperty("post").GetProperty("security");
+        Assert.Contains(reviewSecurity.EnumerateArray(), r => r.TryGetProperty("Administrator", out _));
+        Assert.Contains(reviewSecurity.EnumerateArray(), r => r.TryGetProperty("Human", out _));
 
         var ingest = paths.GetProperty("/api/v1/attendance-events/batch").GetProperty("post");
         var envelope = Resolve(root, ingest.GetProperty("requestBody").GetProperty("content").GetProperty("application/json").GetProperty("schema"));
@@ -47,6 +56,21 @@ public sealed class ApiDocumentationTests(BackendFixture fixture) : IClassFixtur
         Assert.Equal(HttpStatusCode.OK, ui.StatusCode);
         Assert.Contains("swagger-ui-bundle.js", await ui.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/swagger/swagger-ui-bundle.js")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Production_rate_limit_returns_retry_after_when_quota_is_exhausted()
+    {
+        await using var app = fixture.WithWebHostBuilder(builder => builder.UseEnvironment("Production"));
+        using var client = app.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+        for (var i = 0; i < 300; i++)
+        {
+            using var response = await client.GetAsync("/health/live");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        using var limited = await client.GetAsync("/health/live");
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(60), limited.Headers.RetryAfter?.Delta);
     }
 
     [Fact]
